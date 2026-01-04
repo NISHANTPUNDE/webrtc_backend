@@ -8,9 +8,9 @@ const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'Admin API',
+      title: 'WebRTC Backend API',
       version: '1.0.0',
-      description: 'API for managing Admins',
+      description: 'API for WebRTC Recording Management',
     },
     servers: [
       {

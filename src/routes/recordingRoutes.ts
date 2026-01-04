@@ -47,15 +47,55 @@ const upload = multer({
 });
 
 /**
- * Upload a recording
- * POST /v1/recordings/upload
+ * @swagger
+ * /v1/recordings/upload:
+ *   post:
+ *     summary: Upload a new recording
+ *     tags: [Recordings]
+ *     consumes:
+ *       - multipart/form-data
+ *     parameters:
+ *       - in: formData
+ *         name: recording
+ *         type: file
+ *         description: The audio recording file (webm, wav, mp3, ogg)
+ *         required: true
+ *       - in: formData
+ *         name: roomId
+ *         type: string
+ *         description: ID of the room the recording belongs to
+ *       - in: formData
+ *         name: clientId
+ *         type: string
+ *         description: ID of the client who recorded
+ *       - in: formData
+ *         name: duration
+ *         type: integer
+ *         description: Duration of the recording in milliseconds
+ *     responses:
+ *       201:
+ *         description: Recording uploaded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 filename:
+ *                   type: string
+ *                 mergedFile:
+ *                   type: string
+ *                   description: Filename of the merged recording if auto-merge was triggered
+ *       400:
+ *         description: No file uploaded or invalid file type
  */
 router.post('/upload', upload.single('recording'), async (req: Request, res: Response) => {
     if (!req.file) {
         res.status(400).json({ error: 'No file uploaded' });
         return;
     }
-
+    // ... existing implementation ...
     const { roomId, clientId, duration } = req.body;
 
     // Check if we should auto-merge (if another file exists for this room)
@@ -132,12 +172,35 @@ async function mergeRoomRecordings(roomId: string): Promise<string | null> {
 }
 
 /**
- * List all recordings
- * GET /v1/recordings
+ * @swagger
+ * /v1/recordings:
+ *   get:
+ *     summary: List all recordings
+ *     tags: [Recordings]
+ *     responses:
+ *       200:
+ *         description: List of recordings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   filename:
+ *                     type: string
+ *                   size:
+ *                     type: integer
+ *                   createdAt:
+ *                     type: string
+ *                     format: date-time
+ *                   url:
+ *                     type: string
  */
 router.get('/', (req: Request, res: Response) => {
     try {
         const files = fs.readdirSync(recordingsDir);
+        // ... existing implementation ...
         const recordings = files
             .filter(f => ['.webm', '.wav', '.mp3', '.ogg'].includes(path.extname(f).toLowerCase()))
             .map(filename => {
