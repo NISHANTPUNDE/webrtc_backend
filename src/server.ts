@@ -1,262 +1,72 @@
+/**
+ * WebRTC Backend Server
+ * 
+ * This server provides:
+ * - HTTP API for recording management
+ * - WebSocket signaling for WebRTC peer connections
+ */
+
 import express, { Request, Response } from 'express';
-import { createServer } from 'http';
 import { WebSocketServer, WebSocket, RawData } from 'ws';
-import { v4 as uuidv4 } from 'uuid';
 import recordingRoutes from './routes/recordingRoutes';
 import setupSwaggerDocs from './config/swaggerConfig';
-import { recordingManager } from './services/recordingManager';
+import { clientManager } from './services/clientManager';
+import { handleMessage, handleDisconnect, sendActiveRooms } from './services/signalingHandler';
 
-const port = process.env.PORT || 8050;
-const wsPort = process.env.WS_PORT || 8060;
+// ============ Configuration ============
+
+const HTTP_PORT = process.env.PORT || 8050;
+const WS_PORT = process.env.WS_PORT || 8060;
+
+// ============ Express HTTP Server ============
 
 const app = express();
 
-// Middleware for parsing JSON bodies
 app.use(express.json());
 
-/**
- * Health check endpoint
- */
+// Health check
 app.get('/ping', (req: Request, res: Response) => {
   res.status(200).send('pong');
 });
 
-// Swagger docs
+// API Documentation
 setupSwaggerDocs(app);
 
 // Routes
 app.use('/v1/recordings', recordingRoutes);
 
-// Start Express server
-app.listen(port, () => {
-  console.log(`HTTP server running on port ${port}`);
+app.listen(HTTP_PORT, () => {
+  console.log(`[HTTP] Server running on port ${HTTP_PORT}`);
 });
 
 // ============ WebSocket Signaling Server ============
 
-interface Client {
-  id: string;
-  ws: WebSocket;
-  roomId: string | null;
-}
-
-interface Room {
-  id: string;
-  clients: Map<string, Client>;
-}
-
-const rooms = new Map<string, Room>();
-const clients = new Map<string, Client>();
-
-const wsServer = new WebSocketServer({ port: Number(wsPort) });
+const wsServer = new WebSocketServer({ port: Number(WS_PORT) });
 
 wsServer.on('connection', (ws: WebSocket) => {
-  const clientId = uuidv4();
-  const client: Client = { id: clientId, ws, roomId: null };
-  clients.set(clientId, client);
-
-  console.log(`Client connected: ${clientId}`);
+  // Register new client
+  const client = clientManager.registerClient(ws);
 
   // Send client their ID
-  ws.send(JSON.stringify({ type: 'connected', clientId }));
+  ws.send(JSON.stringify({ type: 'connected', clientId: client.id }));
 
+  // Send active rooms list
+  sendActiveRooms(client);
+
+  // Handle incoming messages
   ws.on('message', (data: RawData, isBinary: boolean) => {
-    // Handle binary audio data
-    if (isBinary && client.roomId) {
-      const audioBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-      recordingManager.addAudioChunk(client.roomId, client.id, audioBuffer);
-      return;
-    }
-
-    // Handle JSON messages
-    try {
-      const message = JSON.parse(data.toString());
-      handleMessage(client, message);
-    } catch (error) {
-      console.error('Failed to parse message:', error);
-    }
+    handleMessage(client, data, isBinary);
   });
 
+  // Handle disconnect
   ws.on('close', () => {
     handleDisconnect(client);
   });
 
+  // Handle errors
   ws.on('error', (error) => {
-    console.error(`WebSocket error for ${clientId}:`, error);
+    console.error(`[WS] Error for ${client.id}:`, error);
   });
 });
 
-function handleMessage(client: Client, message: any) {
-  const { type, roomId, targetClientId, payload } = message;
-
-  switch (type) {
-    case 'create-room':
-      createRoom(client);
-      break;
-
-    case 'join-room':
-      joinRoom(client, roomId);
-      break;
-
-    case 'leave-room':
-      leaveRoom(client);
-      break;
-
-    case 'offer':
-    case 'answer':
-    case 'ice-candidate':
-      console.log(`[${type.toUpperCase()}] from ${client.id} to ${targetClientId}`);
-      forwardToClient(client, targetClientId, { type, payload, fromClientId: client.id });
-      break;
-
-    case 'start-recording':
-      handleStartRecording(client);
-      break;
-
-    case 'stop-recording':
-      handleStopRecording(client);
-      break;
-
-    default:
-      console.log(`Unknown message type: ${type}`);
-  }
-}
-
-function handleStartRecording(client: Client) {
-  if (!client.roomId) {
-    client.ws.send(JSON.stringify({ type: 'error', message: 'Not in a room' }));
-    return;
-  }
-
-  const result = recordingManager.startRecording(client.roomId, client.id);
-
-  if (result.success) {
-    // Notify all clients in the room that recording has started
-    const room = rooms.get(client.roomId);
-    if (room) {
-      room.clients.forEach((roomClient) => {
-        roomClient.ws.send(JSON.stringify({
-          type: 'recording-started',
-          startedBy: client.id,
-          roomId: client.roomId
-        }));
-      });
-    }
-  } else {
-    client.ws.send(JSON.stringify({ type: 'error', message: result.message }));
-  }
-}
-
-async function handleStopRecording(client: Client) {
-  if (!client.roomId) {
-    client.ws.send(JSON.stringify({ type: 'error', message: 'Not in a room' }));
-    return;
-  }
-
-  const result = await recordingManager.stopRecording(client.roomId);
-
-  // Notify all clients in the room that recording has stopped
-  const room = rooms.get(client.roomId);
-  if (room) {
-    room.clients.forEach((roomClient) => {
-      roomClient.ws.send(JSON.stringify({
-        type: 'recording-stopped',
-        stoppedBy: client.id,
-        roomId: client.roomId,
-        files: result.files
-      }));
-    });
-  }
-}
-
-function createRoom(client: Client) {
-  const roomId = uuidv4().substring(0, 6).toUpperCase();
-  const room: Room = { id: roomId, clients: new Map() };
-  room.clients.set(client.id, client);
-  rooms.set(roomId, room);
-  client.roomId = roomId;
-
-  client.ws.send(JSON.stringify({
-    type: 'room-created',
-    roomId,
-    participants: [client.id]
-  }));
-
-  console.log(`Room ${roomId} created by ${client.id}`);
-}
-
-function joinRoom(client: Client, roomId: string) {
-  const room = rooms.get(roomId);
-
-  if (!room) {
-    client.ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }));
-    return;
-  }
-
-  // Notify existing participants about new peer
-  const existingClients = Array.from(room.clients.values());
-  existingClients.forEach((existingClient) => {
-    existingClient.ws.send(JSON.stringify({
-      type: 'peer-joined',
-      clientId: client.id
-    }));
-  });
-
-  // Add client to room
-  room.clients.set(client.id, client);
-  client.roomId = roomId;
-
-  // Send room info to new client
-  client.ws.send(JSON.stringify({
-    type: 'room-joined',
-    roomId,
-    participants: existingClients.map(c => c.id)
-  }));
-
-  console.log(`Client ${client.id} joined room ${roomId}. Participants: ${room.clients.size}`);
-}
-
-async function leaveRoom(client: Client) {
-  if (!client.roomId) return;
-
-  const room = rooms.get(client.roomId);
-  if (!room) return;
-
-  // Handle recording cleanup for this client
-  await recordingManager.handleClientDisconnect(client.roomId, client.id);
-
-  room.clients.delete(client.id);
-
-  // Notify remaining participants
-  room.clients.forEach((remainingClient) => {
-    remainingClient.ws.send(JSON.stringify({
-      type: 'peer-left',
-      clientId: client.id
-    }));
-  });
-
-  // Delete room if empty - also stop any active recording
-  if (room.clients.size === 0) {
-    await recordingManager.stopRecording(client.roomId);
-    rooms.delete(client.roomId);
-    console.log(`Room ${client.roomId} deleted (empty)`);
-  }
-
-  console.log(`Client ${client.id} left room ${client.roomId}`);
-  client.roomId = null;
-}
-
-function forwardToClient(from: Client, targetClientId: string, message: any) {
-  const targetClient = clients.get(targetClientId);
-  if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
-    targetClient.ws.send(JSON.stringify(message));
-  }
-}
-
-async function handleDisconnect(client: Client) {
-  await leaveRoom(client);
-  clients.delete(client.id);
-  console.log(`Client disconnected: ${client.id}`);
-}
-
-console.log(`WebSocket signaling server running on port ${wsPort}`);
+console.log(`[WS] Signaling server running on port ${WS_PORT}`);

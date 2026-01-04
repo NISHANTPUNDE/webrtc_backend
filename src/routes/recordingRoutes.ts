@@ -2,7 +2,10 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 
+const execAsync = promisify(exec);
 const router = Router();
 
 // Ensure recordings directory exists
@@ -11,15 +14,21 @@ if (!fs.existsSync(recordingsDir)) {
     fs.mkdirSync(recordingsDir, { recursive: true });
 }
 
-// Configure multer for file uploads
+// Configure multer for file uploads - organize by roomId
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, recordingsDir);
+        const roomId = req.body.roomId || 'unknown';
+        const roomDir = path.join(recordingsDir, roomId);
+        if (!fs.existsSync(roomDir)) {
+            fs.mkdirSync(roomDir, { recursive: true });
+        }
+        cb(null, roomDir);
     },
     filename: (req, file, cb) => {
         const timestamp = Date.now();
+        const clientId = req.body.clientId || 'unknown';
         const ext = path.extname(file.originalname) || '.webm';
-        cb(null, `recording_${timestamp}${ext}`);
+        cb(null, `${clientId}_${timestamp}${ext}`);
     }
 });
 
@@ -41,7 +50,7 @@ const upload = multer({
  * Upload a recording
  * POST /v1/recordings/upload
  */
-router.post('/upload', upload.single('recording'), (req: Request, res: Response) => {
+router.post('/upload', upload.single('recording'), async (req: Request, res: Response) => {
     if (!req.file) {
         res.status(400).json({ error: 'No file uploaded' });
         return;
@@ -49,15 +58,78 @@ router.post('/upload', upload.single('recording'), (req: Request, res: Response)
 
     const { roomId, clientId, duration } = req.body;
 
+    // Check if we should auto-merge (if another file exists for this room)
+    const roomDir = path.join(recordingsDir, roomId || 'unknown');
+    const filesInRoom = fs.existsSync(roomDir) ? fs.readdirSync(roomDir).filter(f => f.endsWith('.webm')) : [];
+
+    let mergedFile = null;
+    if (filesInRoom.length >= 2) {
+        // Try to merge all recordings in this room
+        try {
+            mergedFile = await mergeRoomRecordings(roomId);
+        } catch (e) {
+            console.log('Auto-merge failed, recordings saved separately:', e);
+        }
+    }
+
     res.status(201).json({
         message: 'Recording uploaded successfully',
         filename: req.file.filename,
         size: req.file.size,
         roomId,
         clientId,
-        duration
+        duration,
+        mergedFile
     });
 });
+
+/**
+ * Merge all recordings in a room using FFmpeg
+ */
+async function mergeRoomRecordings(roomId: string): Promise<string | null> {
+    const roomDir = path.join(recordingsDir, roomId);
+    if (!fs.existsSync(roomDir)) return null;
+
+    const files = fs.readdirSync(roomDir)
+        .filter(f => f.endsWith('.webm') && !f.startsWith('merged_'))
+        .map(f => path.join(roomDir, f));
+
+    if (files.length < 2) return null;
+
+    // cleanup previous merged files for this room
+    const existingMerged = fs.readdirSync(recordingsDir)
+        .filter(f => f.startsWith(`merged_${roomId}_`) && f.endsWith('.webm'));
+
+    existingMerged.forEach(f => {
+        try {
+            fs.unlinkSync(path.join(recordingsDir, f));
+        } catch (e) {
+            console.error('[MERGE] Failed to delete old merge:', e);
+        }
+    });
+
+    const outputFilename = `merged_${roomId}_${Date.now()}.webm`;
+    const outputPath = path.join(recordingsDir, outputFilename);
+
+    // FFmpeg command to mix audio files
+    const inputArgs = files.map(f => `-i "${f}"`).join(' ');
+    const filterComplex = files.length === 2
+        ? '-filter_complex "[0:a][1:a]amix=inputs=2:duration=longest"'
+        : `-filter_complex "amix=inputs=${files.length}:duration=longest"`;
+
+    const cmd = `ffmpeg ${inputArgs} ${filterComplex} -c:a libopus "${outputPath}"`;
+
+    console.log(`[MERGE] Running: ${cmd}`);
+
+    try {
+        await execAsync(cmd);
+        console.log(`[MERGE] Created merged file: ${outputFilename}`);
+        return outputFilename;
+    } catch (error) {
+        console.error('[MERGE] FFmpeg error:', error);
+        return null;
+    }
+}
 
 /**
  * List all recordings
