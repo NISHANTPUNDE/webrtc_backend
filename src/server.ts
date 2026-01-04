@@ -96,6 +96,7 @@ function handleMessage(client: Client, message: any) {
     case 'offer':
     case 'answer':
     case 'ice-candidate':
+      console.log(`[${type.toUpperCase()}] from ${client.id} to ${targetClientId}`);
       forwardToClient(client, targetClientId, { type, payload, fromClientId: client.id });
       break;
 
