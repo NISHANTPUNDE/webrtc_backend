@@ -42,7 +42,7 @@ const swaggerSpec = swaggerJsdoc(swaggerOptions);
  * @param app - Express application instance
  */
 const setupSwaggerDocs = (app: express.Application) => {
-  app.use("/v1/admins/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-  console.log("Swagger docs setup complete. Accessible at /v1/admins/api-docs");
+  app.use("/v1/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  console.log("Swagger docs setup complete. Accessible at /v1/api-docs");
 };
 export default setupSwaggerDocs;
