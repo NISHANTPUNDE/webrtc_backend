@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
 import * as adminService from '../services/adminService';
-import logger from '../utils/logger';
-import { createAdminSchema, updateAdminSchema, readByIdAdminSchema } from '../validations/adminValidation';
+import { createAdminSchema } from '../validations/adminValidation';
 
 /**
  * Create a new admin with hashed password.
