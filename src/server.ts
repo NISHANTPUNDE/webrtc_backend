@@ -1,9 +1,10 @@
 import express, { Request, Response } from 'express';
 import { createServer } from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer, WebSocket, RawData } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import recordingRoutes from './routes/recordingRoutes';
 import setupSwaggerDocs from './config/swaggerConfig';
+import { recordingManager } from './services/recordingManager';
 
 const port = process.env.PORT || 8050;
 const wsPort = process.env.WS_PORT || 8060;
@@ -59,7 +60,15 @@ wsServer.on('connection', (ws: WebSocket) => {
   // Send client their ID
   ws.send(JSON.stringify({ type: 'connected', clientId }));
 
-  ws.on('message', (data: Buffer) => {
+  ws.on('message', (data: RawData, isBinary: boolean) => {
+    // Handle binary audio data
+    if (isBinary && client.roomId) {
+      const audioBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      recordingManager.addAudioChunk(client.roomId, client.id, audioBuffer);
+      return;
+    }
+
+    // Handle JSON messages
     try {
       const message = JSON.parse(data.toString());
       handleMessage(client, message);
@@ -100,8 +109,63 @@ function handleMessage(client: Client, message: any) {
       forwardToClient(client, targetClientId, { type, payload, fromClientId: client.id });
       break;
 
+    case 'start-recording':
+      handleStartRecording(client);
+      break;
+
+    case 'stop-recording':
+      handleStopRecording(client);
+      break;
+
     default:
       console.log(`Unknown message type: ${type}`);
+  }
+}
+
+function handleStartRecording(client: Client) {
+  if (!client.roomId) {
+    client.ws.send(JSON.stringify({ type: 'error', message: 'Not in a room' }));
+    return;
+  }
+
+  const result = recordingManager.startRecording(client.roomId, client.id);
+
+  if (result.success) {
+    // Notify all clients in the room that recording has started
+    const room = rooms.get(client.roomId);
+    if (room) {
+      room.clients.forEach((roomClient) => {
+        roomClient.ws.send(JSON.stringify({
+          type: 'recording-started',
+          startedBy: client.id,
+          roomId: client.roomId
+        }));
+      });
+    }
+  } else {
+    client.ws.send(JSON.stringify({ type: 'error', message: result.message }));
+  }
+}
+
+async function handleStopRecording(client: Client) {
+  if (!client.roomId) {
+    client.ws.send(JSON.stringify({ type: 'error', message: 'Not in a room' }));
+    return;
+  }
+
+  const result = await recordingManager.stopRecording(client.roomId);
+
+  // Notify all clients in the room that recording has stopped
+  const room = rooms.get(client.roomId);
+  if (room) {
+    room.clients.forEach((roomClient) => {
+      roomClient.ws.send(JSON.stringify({
+        type: 'recording-stopped',
+        stoppedBy: client.id,
+        roomId: client.roomId,
+        files: result.files
+      }));
+    });
   }
 }
 
@@ -152,11 +216,14 @@ function joinRoom(client: Client, roomId: string) {
   console.log(`Client ${client.id} joined room ${roomId}. Participants: ${room.clients.size}`);
 }
 
-function leaveRoom(client: Client) {
+async function leaveRoom(client: Client) {
   if (!client.roomId) return;
 
   const room = rooms.get(client.roomId);
   if (!room) return;
+
+  // Handle recording cleanup for this client
+  await recordingManager.handleClientDisconnect(client.roomId, client.id);
 
   room.clients.delete(client.id);
 
@@ -168,8 +235,9 @@ function leaveRoom(client: Client) {
     }));
   });
 
-  // Delete room if empty
+  // Delete room if empty - also stop any active recording
   if (room.clients.size === 0) {
+    await recordingManager.stopRecording(client.roomId);
     rooms.delete(client.roomId);
     console.log(`Room ${client.roomId} deleted (empty)`);
   }
@@ -185,8 +253,8 @@ function forwardToClient(from: Client, targetClientId: string, message: any) {
   }
 }
 
-function handleDisconnect(client: Client) {
-  leaveRoom(client);
+async function handleDisconnect(client: Client) {
+  await leaveRoom(client);
   clients.delete(client.id);
   console.log(`Client disconnected: ${client.id}`);
 }
