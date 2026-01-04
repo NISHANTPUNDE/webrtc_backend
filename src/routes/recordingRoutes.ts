@@ -91,12 +91,18 @@ const upload = multer({
  *         description: No file uploaded or invalid file type
  */
 router.post('/upload', upload.single('recording'), async (req: Request, res: Response) => {
+    console.log('[UPLOAD] Received upload request');
+    console.log('[UPLOAD] Body:', req.body);
+    console.log('[UPLOAD] File:', req.file ? req.file.filename : 'No file');
+
     if (!req.file) {
+        console.error('[UPLOAD] Error: No file uploaded');
         res.status(400).json({ error: 'No file uploaded' });
         return;
     }
     // ... existing implementation ...
     const { roomId, clientId, duration } = req.body;
+    console.log(`[UPLOAD] Processing upload for room ${roomId} from client ${clientId}`);
 
     // Check if we should auto-merge (if another file exists for this room)
     const roomDir = path.join(recordingsDir, roomId || 'unknown');
