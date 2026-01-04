@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import express, { Router, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -45,6 +45,45 @@ const upload = multer({
         }
     }
 });
+
+async function mergeRoomRecordings(roomId: string): Promise<string | null> {
+    const roomDir = path.join(recordingsDir, roomId);
+    if (!fs.existsSync(roomDir)) return null;
+
+    const files = fs.readdirSync(roomDir)
+        .filter(f => f.endsWith('.webm') && !f.startsWith('merged_'));
+
+    if (files.length <= 1) return null;
+
+    const inputs = files.map(f => `-i "${path.join(roomDir, f)}"`).join(' ');
+
+    // Delete previous merged files for this room to avoid duplicates
+    const existingMerged = fs.readdirSync(recordingsDir)
+        .filter(f => f.startsWith(`merged_${roomId}_`) && f.endsWith('.webm'));
+
+    existingMerged.forEach(f => {
+        try {
+            fs.unlinkSync(path.join(recordingsDir, f));
+        } catch (e) {
+            console.error('[MERGE] Failed to delete old merge:', e);
+        }
+    });
+
+    const outputFilename = `merged_${roomId}_${Date.now()}.webm`;
+    const outputPath = path.join(recordingsDir, outputFilename);
+    const cmd = `ffmpeg ${inputs} -filter_complex amix=inputs=${files.length}:duration=longest "${outputPath}"`;
+
+    console.log('[MERGE] Executing:', cmd);
+
+    try {
+        await execAsync(cmd);
+        console.log(`[MERGE] Created merged file: ${outputFilename}`);
+        return outputFilename;
+    } catch (error) {
+        console.error('[MERGE] FFmpeg error:', error);
+        return null;
+    }
+}
 
 /**
  * @swagger
@@ -100,82 +139,27 @@ router.post('/upload', upload.single('recording'), async (req: Request, res: Res
         res.status(400).json({ error: 'No file uploaded' });
         return;
     }
-    // ... existing implementation ...
+
     const { roomId, clientId, duration } = req.body;
     console.log(`[UPLOAD] Processing upload for room ${roomId} from client ${clientId}`);
 
     // Check if we should auto-merge (if another file exists for this room)
     const roomDir = path.join(recordingsDir, roomId || 'unknown');
-    const filesInRoom = fs.existsSync(roomDir) ? fs.readdirSync(roomDir).filter(f => f.endsWith('.webm')) : [];
-
     let mergedFile = null;
-    if (filesInRoom.length >= 2) {
-        // Try to merge all recordings in this room
-        try {
+
+    if (fs.existsSync(roomDir)) {
+        const files = fs.readdirSync(roomDir).filter(f => f.endsWith('.webm'));
+        if (files.length > 1) { // We have at least 2 files now
             mergedFile = await mergeRoomRecordings(roomId);
-        } catch (e) {
-            console.log('Auto-merge failed, recordings saved separately:', e);
         }
     }
 
     res.status(201).json({
         message: 'Recording uploaded successfully',
         filename: req.file.filename,
-        size: req.file.size,
-        roomId,
-        clientId,
-        duration,
         mergedFile
     });
 });
-
-/**
- * Merge all recordings in a room using FFmpeg
- */
-async function mergeRoomRecordings(roomId: string): Promise<string | null> {
-    const roomDir = path.join(recordingsDir, roomId);
-    if (!fs.existsSync(roomDir)) return null;
-
-    const files = fs.readdirSync(roomDir)
-        .filter(f => f.endsWith('.webm') && !f.startsWith('merged_'))
-        .map(f => path.join(roomDir, f));
-
-    if (files.length < 2) return null;
-
-    // cleanup previous merged files for this room
-    const existingMerged = fs.readdirSync(recordingsDir)
-        .filter(f => f.startsWith(`merged_${roomId}_`) && f.endsWith('.webm'));
-
-    existingMerged.forEach(f => {
-        try {
-            fs.unlinkSync(path.join(recordingsDir, f));
-        } catch (e) {
-            console.error('[MERGE] Failed to delete old merge:', e);
-        }
-    });
-
-    const outputFilename = `merged_${roomId}_${Date.now()}.webm`;
-    const outputPath = path.join(recordingsDir, outputFilename);
-
-    // FFmpeg command to mix audio files
-    const inputArgs = files.map(f => `-i "${f}"`).join(' ');
-    const filterComplex = files.length === 2
-        ? '-filter_complex "[0:a][1:a]amix=inputs=2:duration=longest"'
-        : `-filter_complex "amix=inputs=${files.length}:duration=longest"`;
-
-    const cmd = `ffmpeg ${inputArgs} ${filterComplex} -c:a libopus "${outputPath}"`;
-
-    console.log(`[MERGE] Running: ${cmd}`);
-
-    try {
-        await execAsync(cmd);
-        console.log(`[MERGE] Created merged file: ${outputFilename}`);
-        return outputFilename;
-    } catch (error) {
-        console.error('[MERGE] FFmpeg error:', error);
-        return null;
-    }
-}
 
 /**
  * @swagger
@@ -226,7 +210,9 @@ router.get('/', (req: Request, res: Response) => {
             .filter(f => ['.webm', '.wav', '.mp3', '.ogg'].includes(path.extname(f).toLowerCase()))
             .map(filepath => {
                 const filename = path.basename(filepath);
+                // Determine relative path from recordingsDir for URL
                 const relativePath = path.relative(recordingsDir, filepath).replace(/\\/g, '/');
+
                 const stats = fs.statSync(filepath);
                 return {
                     filename,
@@ -246,46 +232,14 @@ router.get('/', (req: Request, res: Response) => {
 });
 
 /**
- * Get/stream a specific recording (supports subdirectories)
- * GET /v1/recordings/*
+ * Serve recording files.
+ * Uses express.static to handle file serving, ranges, and subdirectories automatically.
+ * Mounted at /v1/recordings/
  */
-router.get('/:path(.*)', (req: Request, res: Response) => {
-    const filePath = req.params.path;
-    // Prevent directory traversal
-    if (filePath.includes('..')) {
-        res.status(400).json({ error: 'Invalid path' });
-        return;
-    }
-
-    const absolutePath = path.join(recordingsDir, filePath);
-
-    if (!fs.existsSync(absolutePath)) {
-        res.status(404).json({ error: 'Recording not found' });
-        return;
-    }
-
-    const stat = fs.statSync(absolutePath);
-    if (stat.isDirectory()) {
-        res.status(400).json({ error: 'Path is a directory' });
-        return;
-    }
-
-    const ext = path.extname(absolutePath).toLowerCase();
-
-    const mimeTypes: Record<string, string> = {
-        '.webm': 'audio/webm',
-        '.wav': 'audio/wav',
-        '.mp3': 'audio/mpeg',
-        '.ogg': 'audio/ogg'
-    };
-
-    res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
-    res.setHeader('Content-Length', stat.size);
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    const stream = fs.createReadStream(absolutePath);
-    stream.pipe(res);
-});
+router.use('/', express.static(recordingsDir, {
+    index: false, // Don't serve index.html
+    fallthrough: false // 404 if file not found
+}));
 
 /**
  * Delete a recording
