@@ -249,7 +249,7 @@ router.get('/', (req: Request, res: Response) => {
  * Get/stream a specific recording (supports subdirectories)
  * GET /v1/recordings/*
  */
-router.get('/:path(*)', (req: Request, res: Response) => {
+router.get('/:path(.*)', (req: Request, res: Response) => {
     const filePath = req.params.path;
     // Prevent directory traversal
     if (filePath.includes('..')) {
