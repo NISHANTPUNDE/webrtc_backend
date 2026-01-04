@@ -6,8 +6,8 @@ import adminRoutes from './routes/adminRoutes';
 import recordingRoutes from './routes/recordingRoutes';
 import setupSwaggerDocs from './config/swaggerConfig';
 
-const port = process.env.PORT || 3000;
-const wsPort = process.env.WS_PORT || 8080;
+const port = process.env.PORT || 8050;
+const wsPort = process.env.WS_PORT || 8060;
 
 const app = express();
 
