@@ -2,7 +2,6 @@ import express, { Request, Response } from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
-import adminRoutes from './routes/adminRoutes';
 import recordingRoutes from './routes/recordingRoutes';
 import setupSwaggerDocs from './config/swaggerConfig';
 
@@ -25,7 +24,6 @@ app.get('/ping', (req: Request, res: Response) => {
 setupSwaggerDocs(app);
 
 // Routes
-app.use('/v1/admins', adminRoutes);
 app.use('/v1/recordings', recordingRoutes);
 
 // Start Express server
