@@ -205,43 +205,72 @@ async function mergeRoomRecordings(roomId: string): Promise<string | null> {
  */
 router.get('/', (req: Request, res: Response) => {
     try {
-        const files = fs.readdirSync(recordingsDir);
-        // ... existing implementation ...
-        const recordings = files
+        const getAllFiles = (dir: string): string[] => {
+            let results: string[] = [];
+            const list = fs.readdirSync(dir);
+            list.forEach(file => {
+                const filePath = path.join(dir, file);
+                const stat = fs.statSync(filePath);
+                if (stat && stat.isDirectory()) {
+                    results = results.concat(getAllFiles(filePath));
+                } else {
+                    results.push(filePath);
+                }
+            });
+            return results;
+        };
+
+        const allFiles = getAllFiles(recordingsDir);
+
+        const recordings = allFiles
             .filter(f => ['.webm', '.wav', '.mp3', '.ogg'].includes(path.extname(f).toLowerCase()))
-            .map(filename => {
-                const filepath = path.join(recordingsDir, filename);
+            .map(filepath => {
+                const filename = path.basename(filepath);
+                const relativePath = path.relative(recordingsDir, filepath).replace(/\\/g, '/');
                 const stats = fs.statSync(filepath);
                 return {
                     filename,
                     size: stats.size,
                     createdAt: stats.birthtime,
-                    url: `/v1/recordings/${filename}`
+                    url: `/v1/recordings/${relativePath}`
                 };
             })
+            // Sort by creation time desc
             .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-        res.json({ recordings });
+        res.json(recordings);
     } catch (error) {
+        console.error('Error listing recordings:', error);
         res.status(500).json({ error: 'Failed to list recordings' });
     }
 });
 
 /**
- * Get/stream a specific recording
- * GET /v1/recordings/:filename
+ * Get/stream a specific recording (supports subdirectories)
+ * GET /v1/recordings/*
  */
-router.get('/:filename', (req: Request, res: Response) => {
-    const { filename } = req.params;
-    const filepath = path.join(recordingsDir, filename);
+router.get('/:path(*)', (req: Request, res: Response) => {
+    const filePath = req.params.path;
+    // Prevent directory traversal
+    if (filePath.includes('..')) {
+        res.status(400).json({ error: 'Invalid path' });
+        return;
+    }
 
-    if (!fs.existsSync(filepath)) {
+    const absolutePath = path.join(recordingsDir, filePath);
+
+    if (!fs.existsSync(absolutePath)) {
         res.status(404).json({ error: 'Recording not found' });
         return;
     }
 
-    const stat = fs.statSync(filepath);
-    const ext = path.extname(filename).toLowerCase();
+    const stat = fs.statSync(absolutePath);
+    if (stat.isDirectory()) {
+        res.status(400).json({ error: 'Path is a directory' });
+        return;
+    }
+
+    const ext = path.extname(absolutePath).toLowerCase();
 
     const mimeTypes: Record<string, string> = {
         '.webm': 'audio/webm',
@@ -254,7 +283,7 @@ router.get('/:filename', (req: Request, res: Response) => {
     res.setHeader('Content-Length', stat.size);
     res.setHeader('Accept-Ranges', 'bytes');
 
-    const stream = fs.createReadStream(filepath);
+    const stream = fs.createReadStream(absolutePath);
     stream.pipe(res);
 });
 
